@@ -8,6 +8,7 @@
 #endif
 
 using System;
+using System.Diagnostics;
 using System.Linq;
 
 namespace Mono.TextTemplating.CodeCompilation;
@@ -80,4 +81,44 @@ static class CSharpLangVersionHelper
 		CSharpLangVersion.Latest => "latest",
 		_ => throw new ArgumentException ($"Not a valid value: '{version}'", nameof (version))
 	};
+
+	public static CSharpLangVersion ParseMaxLangVersion (string cscPath)
+	{
+		var maxLangVersion = 0;
+
+		try{
+			var psi = new ProcessStartInfo (cscPath, "-langversion:?") {
+				RedirectStandardOutput = true,
+				UseShellExecute = false,
+				CreateNoWindow = true
+			};
+			using var p = Process.Start (psi);
+			if (p == null) {
+				throw new InvalidOperationException ("Failed to start csc process to determine max langversion");
+			}
+			p.WaitForExit ();
+			var output = p.StandardOutput.ReadToEnd ();
+
+			// parse each line as a number, discarding all non-numerical values.
+			var lines = output.Split (Environment.NewLine.ToCharArray(), StringSplitOptions.RemoveEmptyEntries);
+			foreach (var line in lines) {
+				if (int.TryParse (line, out var version)) {
+					maxLangVersion = Math.Max (maxLangVersion, version);
+				}
+			}
+		}catch{}
+
+		return maxLangVersion switch {
+			5 => CSharpLangVersion.v5_0,
+			6 => CSharpLangVersion.v6_0,
+			7 => CSharpLangVersion.v7_0,
+			8 => CSharpLangVersion.v8_0,
+			9 => CSharpLangVersion.v9_0,
+			10 => CSharpLangVersion.v10_0,
+			11 => CSharpLangVersion.v11_0,
+			12 => CSharpLangVersion.v12_0,
+			13 => CSharpLangVersion.v13_0,
+			_ => CSharpLangVersion.Latest // default to "latest" if we can't determine the max version
+		};
+	}
 }

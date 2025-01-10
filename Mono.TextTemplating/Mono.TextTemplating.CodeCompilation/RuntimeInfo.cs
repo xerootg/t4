@@ -87,18 +87,28 @@ namespace Mono.TextTemplating.CodeCompilation
 
 		public static RuntimeInfo GetRuntime ()
 		{
-			if (Type.GetType ("Mono.Runtime") != null)
-			{
-				return GetMonoRuntime ();
+			// VS2022 can host a dotnet runtime, so we need to check for that first
+			var dotnetCoreSdk = GetDotNetCoreSdk ();
+			if (dotnetCoreSdk.IsValid) {
+				return dotnetCoreSdk;
 			}
-			else if (RuntimeInformation.FrameworkDescription.StartsWith (".NET Framework", StringComparison.OrdinalIgnoreCase))
-			{
-				return GetNetFrameworkRuntime ();
+
+			// we failed to find a dotnet runtime, so we need to check for mono or .net framework
+			else{
+				if (Type.GetType ("Mono.Runtime") != null)
+				{
+					return GetMonoRuntime ();
+				}
+				else if (RuntimeInformation.FrameworkDescription.StartsWith (".NET Framework", StringComparison.OrdinalIgnoreCase))
+				{
+					// we can use the MSBuild Roslyn compiler if it's available
+					var roslynRuntime = MsbuildRoslynRootInfo ();
+					// if we can't find the MSBuild Roslyn compiler, fall back to the .NET Framework compiler
+					return roslynRuntime.IsValid ? roslynRuntime : GetNetFrameworkRuntime ();
+				}
 			}
-			else
-			{
-				return GetDotNetCoreSdk ();
-			}
+
+			return FromError (RuntimeKind.NetFramework, "Could not determine runtime");
 		}
 
 		static RuntimeInfo GetMonoRuntime ()
@@ -143,6 +153,37 @@ namespace Mono.TextTemplating.CodeCompilation
 			);
 		}
 
+		static RuntimeInfo MsbuildRoslynRootInfo ()
+		{
+			// expected to be something like C:\Program Files\Microsoft Visual Studio\2022\Enterprise\
+			var vSInstalledDir = Environment.GetEnvironmentVariable ("VSINSTALLDIR");
+			//MSBuild\Current\Bin\amd64
+			if (string.IsNullOrEmpty (vSInstalledDir) || !Directory.Exists (vSInstalledDir)) {
+				return FromError (RuntimeKind.NetFramework, "Could not locate MSBuild directory");
+			}
+			var runtimeDir = Path.Combine (vSInstalledDir, "MSBuild\\Current\\Bin\\amd64");
+			var roslynDir = Path.Combine (vSInstalledDir, "MSBuild\\Current\\Bin\\Roslyn");
+			var csc = Path.Combine (roslynDir, "csc.exe");
+			// should now be C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild\Current\Bin\Roslyn\csc.exe
+			if (!File.Exists (csc)) {
+				return FromError (RuntimeKind.NetFramework, "Could not find csc in MSBuild Roslyn installation");
+			}
+
+			var maxLangVersion = CSharpLangVersionHelper.ParseMaxLangVersion (csc);
+
+			return new RuntimeInfo (
+				RuntimeKind.NetFramework,
+				runtimeDir: runtimeDir,
+				// we don't really care about the version if it's not .net core
+				runtimeVersion: new Version ("4.7.2"),
+				refAssembliesDir: null,
+				runtimeFacadesDir: roslynDir,
+				cscPath: csc,
+				cscMaxLangVersion: maxLangVersion,
+				runtimeLangVersion: CSharpLangVersion.Latest // todo: Resolve this from the version of the compiler
+			);
+		}
+
 		static RuntimeInfo GetDotNetCoreSdk ()
 		{
 			static bool DotnetRootIsValid (string root) => !string.IsNullOrEmpty (root) && (File.Exists (Path.Combine (root, "dotnet")) || File.Exists (Path.Combine (root, "dotnet.exe")));
@@ -158,7 +199,23 @@ namespace Mono.TextTemplating.CodeCompilation
 				dotnetRoot = Path.GetDirectoryName (Path.GetDirectoryName (Path.GetDirectoryName (runtimeDir)));
 
 				if (!DotnetRootIsValid (dotnetRoot)) {
-					return FromError (RuntimeKind.NetCore, "Could not locate .NET root directory from running app. It can be set explicitly via the `DOTNET_ROOT` environment variable.");
+
+					// see if there's a VS install, C:\Program Files\Microsoft Visual Studio\2022\Enterprise\dotnet\net8.0\runtime
+					var vSInstalledDir = Environment.GetEnvironmentVariable ("VSINSTALLDIR");
+
+					// find the dotnet directory and then the highest versioned runtime
+					if (!string.IsNullOrEmpty (vSInstalledDir) && Directory.Exists (vSInstalledDir)) {
+						var vsDotnetDir = Path.Combine (vSInstalledDir, "dotnet");
+						if (Directory.Exists (vsDotnetDir)) {
+
+							// in the VS install, find the highest versioned runtime
+							dotnetRoot = FindHighestVersionedDirectory (vsDotnetDir, d => Directory.Exists (Path.Combine (d, "shared", "Microsoft.NETCore.App")), out _);
+						}
+					}
+
+					if (!DotnetRootIsValid (dotnetRoot)) {
+						return FromError (RuntimeKind.NetCore, "Could not locate .NET root directory from running app. It can be set explicitly via the `DOTNET_ROOT` environment variable.");
+					}
 				}
 			}
 
